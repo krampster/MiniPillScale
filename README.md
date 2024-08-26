@@ -18,6 +18,13 @@ The 3 buttons are for:
 Download the 3d printing files here:
 https://www.printables.com/model/986309
 
+## The logo
+Putting the logo on the Microcontroller was the most frustrating part. I didn't document exactly how to do it, but I had to flash the microcontroller with these examples to get it to work:
+1. SPIFlash / SDFat_format -- format the drive (start over here if it breaks)
+2. TinyUSB / msc_external_flash to create a host USB drive. (There were build breaks and I used Library version 2.3.2). Attach the microcontroller to your computer and it should look like a USB flash drive. Copy the file over and pray that it doesn't get corrupted. I had trouble getting the copy to not be zero bytes.
+3. I modified the example from BreakoutST7789 to ensure the .png would render.
+4. Restore your actual program.
+
 ## Materials
 Parts, mostly from Adafruit: $50
 
