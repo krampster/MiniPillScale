@@ -13,6 +13,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <time.h>
+//#include "esp_sntp.h"
 #include "Secrets.h" // Create a file with your ssid and password
 //const char* ssid     = "ssid"; // Change this to your WiFi SSID
 //const char* password = "password"; // Change this to your WiFi password
@@ -27,6 +28,7 @@ const int BUTTON_PIN_TWO = 1;
 const int BUTTON_PIN_THREE = 2;
 const int BUTTON_PIN_TOP = A2;
 const int TIMEZONE = -8; // PST is -8.
+const int SLEEP_TIME = 30;
 
 ButtonHandler buttonHandler(BUTTON_PIN_ONE, BUTTON_PIN_TWO, BUTTON_PIN_THREE, BUTTON_PIN_TOP);
 
@@ -125,7 +127,6 @@ int zeroOffset = 577396; // Set by taring the scale. This was my value one time 
 float calibrationFactor = 1107.0f; // Set by calibrating the scale. Since we don't care about actual weight, just deltas, precision here isn't important.
 float pillWeight = 0.533f; // This value is overwritten by reading from persisted settings.
 float bottleWeight = 12.0f; // This value is overwritten by reading from persisted settings.
-int finalPillDate = 0; // Some of these variables are no longer used once I started using real datetime
 time_t finalPillDateTime = 0;
 byte pillsPerDay = 1; // I stopped testing any value other than 1.
 
@@ -139,6 +140,10 @@ bool isMorning = true; // assuming 2 pills a day.
 
 void setup() {
   delay(100);
+
+  Serial.begin(115200);
+  Serial.println("setup");
+
   int startTime = millis();
 
   // Pins and Power
@@ -234,20 +239,60 @@ void setup() {
   // Connect to time server and get the time
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServerGoogle, ntpServerApple, ntpServer);
 
+  // We can force sync the time here, or assume that it will happen in the background, if we leave the wifi connected.
+  // int retry = 0;
+  // const int max_retries = 10;
+
+  // while (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED && retry < max_retries) {
+  //     Serial.println("Time not yet synced; waiting...");
+  //     delay(1000);
+  //     retry++;
+  // }
+
+  // if (retry == max_retries) {
+  //     Serial.println("Failed to sync time after 10 seconds!");
+  // } else {
+  //     Serial.println("Time synced successfully!");
+  // }
+
   if (!getLocalTime(&timeinfo)){
     log("bad time");
+    isTimeInfoValid = false;
   } else {
     isTimeInfoValid = true;
     if (LOG_STARTUP) {
       char buf[64];
       strftime(buf, 64, "%A, %B %d %H:%M:%S", &timeinfo);
       log(buf);
+      Serial.println(buf);
       delay(2500);
     }
   }
 
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
+{
+  // Serial debugging
+  Serial.println("");
+  Serial.println("Pill weight was:");
+  Serial.println(pillWeight, 3);
+  Serial.println("Bottle weight was:");
+  Serial.println(bottleWeight, 1);
+
+  tm *finalPillTime = localtime(&finalPillDateTime);
+  char buffinal[64];
+  strftime(buffinal, 64, "%A, %B %d %H:%M:%S", finalPillTime);
+  Serial.println("Final Pill Time:");
+  Serial.println(buffinal);
+
+  char buftoday[64];
+  strftime(buftoday, 64, "%A, %B %d %H:%M:%S", &timeinfo);
+  Serial.println("Today's Time:");
+  Serial.println(buftoday);
+  Serial.println("");
+}
+  // I would normally want to disconnect wifi right away to save battery, but
+  // we need to ensure time is synced, and I'd rather not block.
+  // WiFi.disconnect(true);
+  // WiFi.mode(WIFI_OFF);
 
   transitionTo(STATE_INITIAL);
 }
@@ -428,7 +473,7 @@ void stateNormal(Input input) {
   }
 
   // After 30 seconds in normal mode, power down.
-  if (millis() - transitionTime > 30 * SECONDS) {
+  if (millis() - transitionTime > SLEEP_TIME * SECONDS) {
     transitionTo(STATE_DEEP_SLEEP);
   }
 }
@@ -499,6 +544,21 @@ void stateCalibrationDate(Input input) {
     float fPillCount = getPillCount(weight);
     int pillCount = fPillCount + .5f;
 
+  
+    Serial.println("Pill weight was:");
+    Serial.println(pillWeight, 4);
+    Serial.println("Bottle weight was:");
+    Serial.println(bottleWeight, 1);
+    Serial.println("Pill count is:");
+    Serial.println(pillCount);
+
+    // Infer a more accurate pill weight from all pills instead of the 30 weight.
+    pillWeight = (weight - bottleWeight) / pillCount;
+    storeWeights(bottleWeight, pillWeight);
+
+    Serial.println("Pill weight is:");
+    Serial.println(pillWeight, 4);
+
     // Assumes 1 pill per day.    
     time_t finalTime = addDaysFromNow(pillCount);
     tm *localTime = localtime(&finalTime);
@@ -564,9 +624,9 @@ void stateInfo(Input input) {
     canvas.println(weight, 1);
 
     canvas.print("Bottle: ");
-    canvas.println(bottleWeight, 1);
+    canvas.println(bottleWeight, 2);
     canvas.print("Pill:   ");
-    canvas.println(pillWeight, 2);
+    canvas.println(pillWeight, 3);
 
     if (isTimeInfoValid) {
       char buf[64];
@@ -628,6 +688,9 @@ void statePowerTest1(Input input) {
 }
 
 void stateDeepSleep(Input input) {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+
   //int error = esp_sleep_enable_ext0_wakeup(GPIO_NUM_2, 1); // Works for button 3.
   int error = esp_sleep_enable_ext0_wakeup(GPIO_NUM_16, 1); // Top button, A2.
   if (error == ESP_OK) {
@@ -662,7 +725,6 @@ const char* key_calibrationFactor = "Calibration";
 const char* key_zeroOffset = "ZeroOffset";
 const char* key_bottleWeight = "BottleWeight";
 const char* key_pillWeight = "PillWeight";
-const char* key_finalPillDate = "FinalPillDate";
 const char* key_finalPillDateTime = "FinalPillDT";
 /// Reads the current system settings from EEPROM
 /// If anything looks weird, reset setting to default value
@@ -725,13 +787,8 @@ void readCalibrationSettings(void)
     //logFormattedData("Pill Weight: %.1f", settingPillWeight);
   }
 
-  //Look up the finalPillDate
-  finalPillDate = preferences.getInt(key_finalPillDate);
+  //Look up the finalPillDateTime
   finalPillDateTime = preferences.getLong(key_finalPillDateTime);
-}
-
-void storeFinalPillDate(int finalPillDate) {
-  preferences.putInt(key_finalPillDate, finalPillDate);
 }
 
 void storeFinalPillDateTime(time_t dateTime) {
